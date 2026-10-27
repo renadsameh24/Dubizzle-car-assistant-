@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from dubizzle_car_assistant.inventory import load_listings
 from dubizzle_car_assistant.retrieval.structured import search_listings
+from dubizzle_car_assistant.retrieval.hybrid import hybrid_search
 
 app = FastAPI(title="dubizzle car assistant")
 
@@ -24,6 +25,7 @@ class ListingDetail(ListingSummary):
 
 class ListingMatch(ListingSummary):
     title: str
+    score: float | None = None
 
 def optional_int(value: object) -> int | None:
     if pd.isna(value):
@@ -54,6 +56,7 @@ def get_listings(limit: int = Query(default=5, ge=1, le=100)) -> list[ListingSum
 
 @app.get("/listings/search")
 def search_inventory(
+    q: str | None = None,
     make: str | None = None,
     model: str | None = None,
     year_min: int | None = Query(default=None, ge=1900, le=2100),
@@ -62,15 +65,27 @@ def search_inventory(
     mileage_max: int | None = Query(default=None, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[ListingMatch]:
-    rows = search_listings(
-        make=make,
-        model=model,
-        year_min=year_min,
-        year_max=year_max,
-        price_max=price_max,
-        mileage_max=mileage_max,
-        limit=limit,
-    )
+    if q is not None and q.strip():
+        rows = hybrid_search(
+            q.strip(),
+            make=make,
+            model=model,
+            year_min=year_min,
+            year_max=year_max,
+            price_max=price_max,
+            mileage_max=mileage_max,
+            limit=limit,
+        )
+    else:
+        rows = search_listings(
+            make=make,
+            model=model,
+            year_min=year_min,
+            year_max=year_max,
+            price_max=price_max,
+            mileage_max=mileage_max,
+            limit=limit,
+        )
     return [ListingMatch.model_validate(row) for row in rows]
 
 @app.get("/listings/{listing_id}")
