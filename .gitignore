@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environment (each machine creates its own)
+.venv/
+
+# Secrets
+.env
+
+# Generated leads can contain customer data
+leads.csv
+
+# macOS
+.DS_Store
