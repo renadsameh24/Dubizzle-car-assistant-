@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from dubizzle_car_assistant.inventory import load_listings
+from dubizzle_car_assistant.retrieval.structured import search_listings
 
 app = FastAPI(title="dubizzle car assistant")
 
@@ -20,6 +21,9 @@ class ListingDetail(ListingSummary):
     title: str
     description: str
     photo_url: str
+
+class ListingMatch(ListingSummary):
+    title: str
 
 def optional_int(value: object) -> int | None:
     if pd.isna(value):
@@ -47,6 +51,27 @@ def get_listings(limit: int = Query(default=5, ge=1, le=100)) -> list[ListingSum
         )
         for row in frame.itertuples(index=False)
     ]
+
+@app.get("/listings/search")
+def search_inventory(
+    make: str | None = None,
+    model: str | None = None,
+    year_min: int | None = Query(default=None, ge=1900, le=2100),
+    year_max: int | None = Query(default=None, ge=1900, le=2100),
+    price_max: int | None = Query(default=None, ge=0),
+    mileage_max: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[ListingMatch]:
+    rows = search_listings(
+        make=make,
+        model=model,
+        year_min=year_min,
+        year_max=year_max,
+        price_max=price_max,
+        mileage_max=mileage_max,
+        limit=limit,
+    )
+    return [ListingMatch.model_validate(row) for row in rows]
 
 @app.get("/listings/{listing_id}")
 def get_listing(listing_id: int) -> ListingDetail:
