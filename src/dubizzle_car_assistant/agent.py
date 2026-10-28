@@ -9,6 +9,7 @@ from dubizzle_car_assistant.memory.profile import (
     remember_user,
 )
 from dubizzle_car_assistant.booking import request_viewing
+from dubizzle_car_assistant.leads import request_lead
 
 CHAT_MODEL = "gemini/gemini-3.1-flash-lite"
 
@@ -86,6 +87,31 @@ BOOK_TOOL = {
                 },
             },
             "required": ["listing_id", "when"],
+        },
+    },
+}
+
+LEAD_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "save_lead",
+        "description": (
+            "Save a sales lead when the visitor has both a maximum budget "
+            "in AED and a description of the car they need."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "price_max_aed": {
+                    "type": "integer",
+                    "description": "Maximum sale price in AED, not a monthly payment.",
+                },
+                "needs": {
+                    "type": "string",
+                    "description": "What the visitor wants, in their own words.",
+                },
+            },
+            "required": ["price_max_aed", "needs"],
         },
     },
 }
@@ -189,7 +215,10 @@ SYSTEM_PROMPT = (
     "call save_visitor_memory, then confirm only the fields that tool saved. "
     "When the user asks to book a viewing, call book_viewing. "
     "Confirm the booking only when book_viewing returns booked true. "
-    "When book_viewing returns booked false, tell the user the reason and do not say it is booked."
+    "When book_viewing returns booked false, tell the user the reason and do not say it is booked. "
+    "When the user states both a maximum budget and what car they need, call save_lead. "
+    "Say the lead was saved only when save_lead returns saved true. "
+    "When it returns saved false, tell the user which detail is missing."
 )
 
 
@@ -226,7 +255,7 @@ def answer(
     first = litellm.completion(
         model=CHAT_MODEL,
         messages=messages,
-        tools=[SEARCH_TOOL, SAVE_TOOL, BOOK_TOOL],
+        tools=[SEARCH_TOOL, SAVE_TOOL, BOOK_TOOL, LEAD_TOOL],
         tool_choice="auto",
     )
     message = first.choices[0].message
@@ -243,6 +272,13 @@ def answer(
             payload = save_visitor_memory(user_id, arguments)
         elif call.function.name == "book_viewing":
             payload = request_viewing(arguments)
+        elif call.function.name == "save_lead":
+            visitor_name = None if profile is None else profile.get("name")
+            payload = request_lead(
+                user_id,
+                arguments,
+                name=visitor_name if isinstance(visitor_name, str) else None,
+            )
         else:
             payload = {"error": f"Unknown tool {call.function.name}"}
         messages.append(
