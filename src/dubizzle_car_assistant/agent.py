@@ -8,6 +8,7 @@ from dubizzle_car_assistant.memory.profile import (
     load_profile,
     remember_user,
 )
+from dubizzle_car_assistant.booking import request_viewing
 
 CHAT_MODEL = "gemini/gemini-3.1-flash-lite"
 
@@ -67,6 +68,27 @@ SAVE_TOOL = {
     },
 }
 
+BOOK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "book_viewing",
+        "description": (
+            "Book a viewing for one listing. when is local time as "
+            "YYYY-MM-DD HH:MM. Viewings are Monday to Saturday, 08:00 to 20:00."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "listing_id": {"type": "integer"},
+                "when": {
+                    "type": "string",
+                    "description": "Local viewing time, for example 2026-10-26 08:00.",
+                },
+            },
+            "required": ["listing_id", "when"],
+        },
+    },
+}
 
 def propose_search(user_message: str) -> dict[str, object]:
     load_gemini_key()
@@ -162,9 +184,12 @@ SYSTEM_PROMPT = (
     "If price_aed or mileage_km is null, say it is not listed. "
     "If the user refers to a car you already showed, answer from the conversation. "
     "Call search_cars again only when they ask for a different car. "
-    "Do not invent listings, prices, or mileage."
+    "Do not invent listings, prices, or mileage. "
     "When the user gives their name, a car preference, or a listing they like, "
-    "call save_visitor_memory, then confirm only the fields that tool saved."
+    "call save_visitor_memory, then confirm only the fields that tool saved. "
+    "When the user asks to book a viewing, call book_viewing. "
+    "Confirm the booking only when book_viewing returns booked true. "
+    "When book_viewing returns booked false, tell the user the reason and do not say it is booked."
 )
 
 
@@ -201,7 +226,7 @@ def answer(
     first = litellm.completion(
         model=CHAT_MODEL,
         messages=messages,
-        tools=[SEARCH_TOOL, SAVE_TOOL],
+        tools=[SEARCH_TOOL, SAVE_TOOL, BOOK_TOOL],
         tool_choice="auto",
     )
     message = first.choices[0].message
@@ -216,6 +241,8 @@ def answer(
             payload: object = run_search(arguments)
         elif call.function.name == "save_visitor_memory":
             payload = save_visitor_memory(user_id, arguments)
+        elif call.function.name == "book_viewing":
+            payload = request_viewing(arguments)
         else:
             payload = {"error": f"Unknown tool {call.function.name}"}
         messages.append(
