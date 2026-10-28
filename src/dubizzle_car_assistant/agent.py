@@ -100,18 +100,23 @@ SYSTEM_PROMPT = (
     "After the tool returns, mention only those cars. "
     "Use their listing id, make, model, year, and price. "
     "If price_aed or mileage_km is null, say it is not listed. "
+    "If the user refers to a car you already showed, answer from the conversation. "
+    "Call search_cars again only when they ask for a different car. "
     "Do not invent listings, prices, or mileage."
 )
 
 
-def answer(user_message: str) -> str:
+def answer(user_message: str, history: list[dict[str, str]] | None = None) -> str:
     load_gemini_key()
     import litellm
 
     messages: list[dict[str, object]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_message},
     ]
+    for turn in history or []:
+        messages.append({"role": turn["role"], "content": turn["content"]})
+    messages.append({"role": "user", "content": user_message})
+    
     first = litellm.completion(
         model=CHAT_MODEL,
         messages=messages,

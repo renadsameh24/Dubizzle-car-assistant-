@@ -6,6 +6,7 @@ from dubizzle_car_assistant.inventory import load_listings
 from dubizzle_car_assistant.retrieval.structured import search_listings
 from dubizzle_car_assistant.retrieval.hybrid import hybrid_search
 from dubizzle_car_assistant.agent import answer
+from dubizzle_car_assistant.memory.session import append_turn, get_history
 
 app = FastAPI(title="dubizzle car assistant")
 
@@ -110,12 +111,18 @@ def get_listing(listing_id: int) -> ListingDetail:
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+    session_id: str = Field(default="default", min_length=1, max_length=64)
 
 
 class ChatResponse(BaseModel):
+    session_id: str
     reply: str
 
 
 @app.post("/chat")
 def chat(request: ChatRequest) -> ChatResponse:
-    return ChatResponse(reply=answer(request.message))
+    history = get_history(request.session_id)
+    reply = answer(request.message, history=history)
+    append_turn(request.session_id, "user", request.message)
+    append_turn(request.session_id, "assistant", reply)
+    return ChatResponse(session_id=request.session_id, reply=reply)
