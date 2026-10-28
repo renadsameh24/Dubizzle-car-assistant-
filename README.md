@@ -1,6 +1,6 @@
 # dubizzle AI Car Shopping Assistant
 
-A local, LLM-powered car-shopping prototype built for the **dubizzle Machine Learning Intern Take-Home Assessment**. Shoppers can describe what they need in natural language, explore grounded recommendations from a supplied inventory, compare listings, arrange simulated viewings, and return to saved preferences.
+A local, LLM-powered car-shopping prototype built for the **dubizzle Machine Learning Intern Take-Home Assessment**. Shoppers can describe what they need in natural language, explore grounded recommendations from a supplied inventory, compare listings, arrange simulated viewings, and return to saved preferences. The source is [github.com/renadsameh24/Dubizzle-car-assistant-](https://github.com/renadsameh24/Dubizzle-car-assistant-).
 
 **Core idea:** combine the precision of structured database queries with the flexibility of semantic retrieval, rather than asking an LLM to guess which vehicles satisfy a shopper's requirements.
 
@@ -79,55 +79,112 @@ Feature evidence comes from the original ad text. It is labeled as an **advertis
 
 ## Run locally
 
-**Prerequisites:** [uv](https://docs.astral.sh/uv/) and a [Google AI Studio](https://aistudio.google.com/apikey) API key. `.python-version` pins **Python 3.13**. `uv` downloads that Python during sync if it is not already installed. The lockfile `uv.lock` is in the repository, so the install below uses those exact package versions.
+These are the commands to go from a new machine to the running page. Use macOS or Linux, in Terminal or Git Bash. Run steps 4 through 10 from the repository root, the folder that contains `pyproject.toml`.
 
-Clone the repository and run every command from the repository root (the folder that contains `pyproject.toml`, `.env.example`, and `data/`).
+Create a free key at [Google AI Studio](https://aistudio.google.com/apikey) before step 6. Copy the key. It is used only in `.env`.
+
+**1. Install uv** (skip if `uv --version` already prints a version)
+
+macOS or Linux:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+uv --version
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv --version
+```
+
+If `uv` is not found, close the terminal, open a new one, and run `uv --version` again. On Windows, run every command after this in Git Bash.
+
+**2. Install the Python this project pins**
+
+`.python-version` is `3.13`. This downloads it if it is not already installed:
+
+```bash
+uv python install 3.13
+```
+
+**3. Clone the repository**
+
+The repository is [https://github.com/renadsameh24/Dubizzle-car-assistant-](https://github.com/renadsameh24/Dubizzle-car-assistant-).
+
+```bash
+git clone https://github.com/renadsameh24/Dubizzle-car-assistant-.git
+cd Dubizzle-car-assistant-
+```
+
+**4. Install the locked dependencies**
+
+`uv.lock` is in the repository. This command installs those exact versions, including the test tools, and does not change the lockfile. It needs a network connection the first time.
 
 ```bash
 uv sync --frozen
-cp .env.example .env
 ```
 
-Open `.env` and replace `your_key_here` with your own key. Leave the model lines unless a model is unavailable to that key. `.env` is gitignored; do not commit it.
+**5. Create `.env`**
 
-```dotenv
-GEMINI_API_KEY=your_key_here
+In the command below, replace `YOUR_GOOGLE_AI_STUDIO_KEY` with the key you copied, then run it. Leave the two model lines unchanged. `.env` is gitignored. Do not commit it.
+
+```bash
+cat > .env << 'EOF'
+GEMINI_API_KEY=YOUR_GOOGLE_AI_STUDIO_KEY
 GEMINI_CHAT_MODEL=gemini/gemini-flash-lite-latest
 GEMINI_CHAT_FALLBACK=gemini/gemini-3.5-flash-lite
+EOF
 ```
 
-The application uses `gemini/gemini-embedding-001` for embeddings. Model availability and free-tier quota may vary; use supported models available to your API key. The chat client has bounded retry/fallback behavior for temporary provider failures. If the primary chat model returns 503, 429, a timeout, 404, or 500, it waits at most two seconds and tries the fallback once. 401 and 403 stop.
+The quotes around `EOF` matter. With those quotes, the shell does not alter the key. Embeddings use `gemini/gemini-embedding-001`. That name is fixed in the code and is not a line in `.env`. If the primary chat model returns 503, 429, a timeout, 404, or 500, the assistant waits at most two seconds and tries the fallback once. 401 and 403 stop.
 
-The page calls the API at `http://127.0.0.1:8000`. Start the API first, and leave it running. A chat request can take a minute or more when Gemini is called; the page waits up to 120 seconds.
-
-**Terminal 1 — backend**
+**6. Start the API and leave this terminal open**
 
 ```bash
-uv run uvicorn dubizzle_car_assistant.main:app --reload
+uv run uvicorn dubizzle_car_assistant.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-That binds `127.0.0.1:8000`. Check it with `http://127.0.0.1:8000/health` (`{"status":"ok"}`). Interactive API documentation is at `http://127.0.0.1:8000/docs`.
-
-**Terminal 2 — frontend**
+**7. In a second terminal, from the same folder, check the API**
 
 ```bash
-uv run streamlit run app.py
+cd Dubizzle-car-assistant-
+curl -sS http://127.0.0.1:8000/health
 ```
 
-Open the local URL Streamlit prints, usually **http://localhost:8501**.
+The output is `{"status":"ok"}`. Interactive API documentation is at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
-On the page, type a name to start. To come back, type the same name, then continue a saved chat or start an empty one. Use a fictional name. `data/memory.sqlite` and `leads.csv` are created locally and are not in the repository.
+**8. In that second terminal, start the page and leave it open**
 
-The repository includes `data/listing_embeddings.npz` for its current inventory. **Rebuild the index only when the inventory changes.** The rebuild calls the embedding API and needs the key in `.env`:
+The page calls only `http://127.0.0.1:8000`. A chat turn that calls Gemini can take about a minute. The page waits up to 120 seconds.
+
+```bash
+uv run streamlit run app.py --server.address localhost --server.port 8501
+```
+
+**9. Open the page**
+
+[http://localhost:8501](http://localhost:8501)
+
+Type a fictional name to start. To come back, type the same name, then continue a saved chat or start an empty one. `data/memory.sqlite` and `leads.csv` are created on this machine and are not in the repository.
+
+**10. Run the tests**
+
+From the repository root, in another terminal. These tests do not call Gemini.
+
+```bash
+cd Dubizzle-car-assistant-
+uv run pytest -q
+```
+
+Stop the API and the page with Ctrl+C in their terminals.
+
+The repository already includes `data/cars.xlsx` and `data/listing_embeddings.npz`. Rebuild the embedding file only if the spreadsheet changes. That command calls the embedding API and needs the key in `.env`:
 
 ```bash
 uv run python -c "from dubizzle_car_assistant.retrieval.semantic import build_embedding_index; build_embedding_index()"
-```
-
-Run the tests from the same folder. They do not call Gemini:
-
-```bash
-uv run pytest -q
 ```
 
 ## Demonstration
