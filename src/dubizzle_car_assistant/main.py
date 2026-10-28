@@ -1,10 +1,11 @@
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from dubizzle_car_assistant.inventory import load_listings
 from dubizzle_car_assistant.retrieval.structured import search_listings
 from dubizzle_car_assistant.retrieval.hybrid import hybrid_search
+from dubizzle_car_assistant.agent import answer
 
 app = FastAPI(title="dubizzle car assistant")
 
@@ -106,3 +107,15 @@ def get_listing(listing_id: int) -> ListingDetail:
         description=row["description"],
         photo_url=row["photo_url"],
     )
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class ChatResponse(BaseModel):
+    reply: str
+
+
+@app.post("/chat")
+def chat(request: ChatRequest) -> ChatResponse:
+    return ChatResponse(reply=answer(request.message))
