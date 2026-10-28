@@ -11,12 +11,27 @@ def test_viewing_hours():
     assert "Monday" in viewing_rejection(datetime(2026, 11, 1, 10, 0))
 
 
-def test_book_viewing_requires_a_real_listing_and_open_hours():
-    booked = book_viewing(61, datetime(2026, 10, 26, 8, 0))
+def test_book_viewing_requires_a_real_listing_and_open_hours(tmp_path, monkeypatch):
+    from datetime import timezone
+
+    from dubizzle_car_assistant.booking import DUBAI
+
+    monkeypatch.setattr(
+        "dubizzle_car_assistant.memory.profile.DATABASE_PATH",
+        tmp_path / "memory.sqlite",
+    )
+    now = datetime(2026, 10, 1, 9, 0, tzinfo=DUBAI)
+    booked = book_viewing(61, datetime(2026, 10, 26, 8, 0), now=now)
     assert booked["booked"] is True
     assert booked["listing_id"] == 61
-    assert book_viewing(999, datetime(2026, 10, 26, 10, 0))["booked"] is False
-    assert book_viewing(61, datetime(2026, 11, 1, 10, 0))["booked"] is False
+    again = book_viewing(61, datetime(2026, 10, 26, 8, 0), now=now)
+    assert again["booked"] is False
+    assert "already booked" in again["reason"]
+    assert book_viewing(999, datetime(2026, 10, 26, 10, 0), now=now)["booked"] is False
+    assert book_viewing(61, datetime(2026, 11, 1, 10, 0), now=now)["booked"] is False
+    past = book_viewing(61, datetime(2026, 10, 26, 8, 0), now=datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc))
+    assert past["booked"] is False
+    assert "passed" in past["reason"]
 
 
 def test_request_viewing_rejects_bad_arguments():
@@ -55,4 +70,4 @@ def test_answer_asks_the_user_to_retry_when_the_model_is_busy(monkeypatch):
         )
 
     monkeypatch.setattr(litellm, "completion", busy)
-    assert answer("Show me a family car") == BUSY_REPLY
+    assert answer("Show me a family car").reply == BUSY_REPLY

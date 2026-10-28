@@ -38,6 +38,8 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 INDEX_PATH = Path(__file__).resolve().parents[3] / "data" / "listing_embeddings.npz"
 EMBEDDING_BATCH_SIZE = 20
+_index_cache: tuple[np.ndarray, np.ndarray] | None = None
+_query_cache: dict[str, np.ndarray] = {}
 
 
 def listing_text(title: str, description: str) -> str:
@@ -61,11 +63,19 @@ def build_embedding_index(path: Path = INDEX_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, listing_ids=frame["listing_id"].to_numpy(), vectors=matrix)
 
+def _load_index() -> tuple[np.ndarray, np.ndarray]:
+    global _index_cache
+    if _index_cache is None:
+        archive = np.load(INDEX_PATH)
+        _index_cache = (archive["listing_ids"], archive["vectors"])
+    return _index_cache
+
+
 def similarity_scores(query: str) -> dict[int, float]:
-    archive = np.load(INDEX_PATH)
-    listing_ids = archive["listing_ids"]
-    matrix = archive["vectors"]
-    query_vector = np.asarray(embed_texts([query])[0], dtype=np.float32)
+    listing_ids, matrix = _load_index()
+    if query not in _query_cache:
+        _query_cache[query] = np.asarray(embed_texts([query])[0], dtype=np.float32)
+    query_vector = _query_cache[query]
     row_norms = np.linalg.norm(matrix, axis=1)
     query_norm = float(np.linalg.norm(query_vector))
     scores = matrix @ query_vector

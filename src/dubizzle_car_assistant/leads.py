@@ -20,12 +20,28 @@ def save_lead(
     if not isinstance(needs, str) or not needs.strip():
         return {"saved": False, "reason": "The visitor's needs are required."}
 
+    needs_text = needs.strip()
+    visitor = user_id.strip()
+    if LEADS_PATH.exists():
+        with LEADS_PATH.open(newline="") as handle:
+            for existing in csv.DictReader(handle):
+                if (
+                    existing.get("user_id") == visitor
+                    and existing.get("needs") == needs_text
+                    and existing.get("price_max_aed") == str(price_max_aed)
+                ):
+                    return {
+                        "saved": True,
+                        "duplicate": True,
+                        "price_max_aed": price_max_aed,
+                        "needs": needs_text,
+                    }
     row = {
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "user_id": user_id.strip(),
+        "user_id": visitor,
         "name": "" if name is None else name.strip(),
         "price_max_aed": price_max_aed,
-        "needs": needs.strip(),
+        "needs": needs_text,
     }
     new_file = not LEADS_PATH.exists()
     with LEADS_PATH.open("a", newline="") as handle:

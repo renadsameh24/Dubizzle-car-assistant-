@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -64,7 +65,8 @@ def parse_mileage_km(text: str) -> int | None:
     if plain:
         return plain[0]
     return None
-def load_listings(path: Path = DATA_PATH) -> pd.DataFrame:
+@lru_cache(maxsize=4)
+def _read_listings(path: str) -> pd.DataFrame:
     frame = pd.read_excel(path, sheet_name=SHEET_NAME)
     listings = pd.DataFrame(
         {
@@ -82,3 +84,7 @@ def load_listings(path: Path = DATA_PATH) -> pd.DataFrame:
     listings["price_aed"] = text.map(parse_price_aed).astype("Int64")
     listings["mileage_km"] = text.map(parse_mileage_km).astype("Int64")
     return listings
+
+
+def load_listings(path: Path = DATA_PATH) -> pd.DataFrame:
+    return _read_listings(str(path)).copy()
