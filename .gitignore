@@ -15,5 +15,8 @@ wheels/
 # Generated leads can contain customer data
 leads.csv
 
+# Saved visitor profiles can contain personal data
+data/memory.sqlite
+
 # macOS
 .DS_Store

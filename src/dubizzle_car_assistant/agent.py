@@ -106,17 +106,35 @@ SYSTEM_PROMPT = (
 )
 
 
-def answer(user_message: str, history: list[dict[str, str]] | None = None) -> str:
+def answer(
+    user_message: str,
+    history: list[dict[str, str]] | None = None,
+    profile: dict[str, object] | None = None,
+) -> str:
     load_gemini_key()
     import litellm
 
+    system = SYSTEM_PROMPT
+    if profile is not None and profile.get("name"):
+        preferences = profile["preferences"] or []
+        liked = profile["liked_listing_ids"] or []
+        system += (
+            "\n\nReturning visitor:\n"
+            f"Name: {profile['name']}\n"
+            f"Preferences: {', '.join(preferences) or 'none'}\n"
+            f"Liked listing ids: {', '.join(str(item) for item in liked) or 'none'}\n"
+            "Use this for their name and stated preferences. "
+            "It is not the inventory. Call search_cars when they want to see cars."
+        )
+
     messages: list[dict[str, object]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system},
     ]
+    
     for turn in history or []:
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": user_message})
-    
+
     first = litellm.completion(
         model=CHAT_MODEL,
         messages=messages,
