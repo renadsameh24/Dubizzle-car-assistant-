@@ -86,7 +86,7 @@ def api(method: str, path: str, payload: dict | None = None) -> dict:
         method=method,
     )
     try:
-        with urlopen(request, timeout=75) as response:
+        with urlopen(request, timeout=120) as response:
             body = json.load(response)
             return body if isinstance(body, dict) else {"items": body}
     except HTTPError as error:
@@ -345,7 +345,10 @@ def chat() -> None:
         with st.status("Searching the inventory...", expanded=True) as status:
             st.write("Checking the listings that match this question.")
             body = ask(st.session_state.awaiting)
-            status.update(label="Preparing the reply", state="complete")
+            if body.get("answered") is False:
+                status.update(label="The assistant could not finish that question", state="error")
+            else:
+                status.update(label="Preparing the reply", state="complete")
         reply = str(body.get("reply") or "").strip()
         listings = body.get("listings") or []
         if not reply:

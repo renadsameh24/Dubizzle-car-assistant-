@@ -158,6 +158,7 @@ class ChatResponse(BaseModel):
     session_id: str
     reply: str
     listings: list[CarCard] = []
+    answered: bool = True
 
 
 @app.post("/visitors")
@@ -209,4 +210,5 @@ def chat(request: ChatRequest) -> ChatResponse:
         session_id=request.session_id,
         reply=result.reply,
         listings=result.listings,
+        answered=result.answered,
     )

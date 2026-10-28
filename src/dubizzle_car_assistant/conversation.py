@@ -410,6 +410,46 @@ def refers_to_previous_search(text: str) -> bool:
     ) is not None
 
 
+def recall_question(text: str) -> bool:
+    """A question about the saved name or preference, not a new inventory search."""
+    return re.search(
+        r"what do you remember|what am i looking for|what i(?:'m| am) looking for|"
+        r"what kind of car (?:did|was) i|what(?:'s| is) my name|what(?:'s| is) my preference|"
+        r"what did i say i want|what have i told you|do you remember what|"
+        r"what did i tell you|what kind of car was i looking for",
+        text,
+        re.I,
+    ) is not None
+
+
+def preference_save(text: str) -> str | None:
+    """Return the preference to store, or 'focus' for the car already on screen.
+
+    None means this message is not asking to save a preference.
+    """
+    if recall_question(text):
+        return None
+    if not re.search(
+        r"as my preference|(?:this|that|it) is my preference|"
+        r"save (?:it|this|that)|remember (?:it|this|that)|"
+        r"make (?:it|this|that) my preference",
+        text,
+        re.I,
+    ):
+        return None
+    match = re.search(
+        r"(?:i want|i(?:'d| would) like|remember|save|set|make)\s+(.+?)\s+as my preference",
+        text,
+        re.I,
+    )
+    if not match:
+        return "focus"
+    target = match.group(1).strip(" .,")
+    if re.fullmatch(r"(?:it|this|that|this one|that one|this car|that car|the car)", target, re.I):
+        return "focus"
+    return target
+
+
 def ranking_request(text: str) -> str | None:
     lowered = text.lower()
     if re.search(r"\bcheapest\b|\blowest price\b|\bleast expensive\b", lowered):
@@ -476,10 +516,12 @@ def _broad_search(text: str) -> bool:
 
 
 def named_listing_ids(text: str) -> list[int]:
-    """Listings named by a model word. A short token such as Mazda's '3' is ignored."""
+    """Listings named by make and model. A short model counts only with its make."""
     from dubizzle_car_assistant.inventory import load_listings
 
     lowered = normalize_makes(text).lower()
+    frame = load_listings()
+    make = _mentioned_make(lowered)
     model = None
     for candidate in _known_models():
         if candidate in _known_makes():
@@ -487,11 +529,23 @@ def named_listing_ids(text: str) -> list[int]:
         if re.search(rf"\b{re.escape(candidate)}\b", lowered):
             model = candidate
             break
+    if model is None and make:
+        short_models = sorted(
+            {
+                str(item)
+                for item in frame.loc[frame["make"] == make, "model"].unique()
+                if len(str(item)) < 3
+            },
+            key=len,
+            reverse=True,
+        )
+        for candidate in short_models:
+            if re.search(rf"\b{re.escape(candidate)}\b", lowered):
+                model = candidate
+                break
     if model is None:
         return []
-    frame = load_listings()
     rows = frame.loc[frame["model"] == model]
-    make = _mentioned_make(lowered)
     if make:
         rows = rows.loc[rows["make"] == make]
     years = [int(year) for year in re.findall(r"\b(?:19|20)\d{2}\b", lowered)]

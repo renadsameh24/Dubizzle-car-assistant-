@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from dubizzle_car_assistant.booking import DUBAI, request_viewing, resolve_schedule
+from dubizzle_car_assistant.booking import DUBAI, is_recall, request_viewing, resolve_schedule
 from dubizzle_car_assistant.conversation import price_cap, resolve_listing_reference
 
 NOW = datetime(2026, 10, 28, 11, 0, tzinfo=DUBAI)
@@ -280,6 +280,117 @@ def test_what_did_i_book_matches_the_saved_row(tmp_path, monkeypatch):
     assert len(_rows()) == 1
 
 
+def test_what_car_and_time_recalls_the_saved_booking(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "dubizzle_car_assistant.memory.profile.DATABASE_PATH",
+        tmp_path / "memory.sqlite",
+    )
+    request_viewing(
+        {"listing_id": 12},
+        user_text="Book listing 12 next Saturday at 9 AM",
+        now=NOW,
+        session_id="shopper",
+        user_id="jana",
+    )
+
+    def explode(**kwargs):
+        raise AssertionError("a saved booking is recalled without the model")
+
+    monkeypatch.setattr("litellm.completion", explode)
+    from dubizzle_car_assistant.agent import answer
+
+    result = answer(
+        "What car and time do I currently have booked?",
+        session_id="shopper",
+        user_id="jana",
+        now=NOW,
+    )
+    assert "Mazda" in result.reply
+    assert "09:00" in result.reply
+    assert "No time was given" not in result.reply
+
+
+def test_booking_questions_recall_whatever_the_wording(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "dubizzle_car_assistant.memory.profile.DATABASE_PATH",
+        tmp_path / "memory.sqlite",
+    )
+    request_viewing(
+        {"listing_id": 12},
+        user_text="Book listing 12 next Saturday at 9 AM",
+        now=NOW,
+        session_id="shopper",
+        user_id="jana",
+    )
+
+    def explode(**kwargs):
+        raise AssertionError("a booking question is answered from the saved row")
+
+    monkeypatch.setattr("litellm.completion", explode)
+    from dubizzle_car_assistant.agent import answer
+
+    for question in (
+        "when is my viewing?",
+        "which car did I reserve?",
+        "did I already schedule something?",
+        "have I booked anything?",
+        "remind me of my appointment",
+    ):
+        result = answer(question, session_id="shopper", user_id="jana", now=NOW)
+        assert "Mazda" in result.reply, question
+        assert "09:00" in result.reply, question
+        assert "No time was given" not in result.reply
+
+    tool_call = request_viewing(
+        {"when": "tomorrow at 9 AM", "listing_id": 44},
+        user_text="so what am I down for?",
+        now=NOW,
+        session_id="shopper",
+        user_id="jana",
+    )
+    assert tool_call["recalled"] is True
+    assert "09:00" in tool_call["summary"]
+    assert "No time was given" not in tool_call["summary"]
+    assert len(_rows()) == 1
+
+    assert is_recall("Any decent Japanese cars from 2019 onwards?") is False
+    assert is_recall("What cars can I book?") is False
+    fresh = request_viewing(
+        {},
+        user_text="Book a viewing",
+        now=NOW,
+        session_id="shopper",
+        user_id="jana",
+    )
+    assert fresh.get("recalled") is not True
+    assert "No day or time was given" in str(fresh.get("reason"))
+
+
+def test_change_to_a_clock_time_uses_the_saved_booking(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "dubizzle_car_assistant.memory.profile.DATABASE_PATH",
+        tmp_path / "memory.sqlite",
+    )
+    request_viewing(
+        {"listing_id": 12},
+        user_text="Book listing 12 next Saturday at 10 AM",
+        now=NOW,
+        session_id="shopper",
+        user_id="jana",
+    )
+
+    def explode(**kwargs):
+        raise AssertionError("changing the hour uses the saved booking")
+
+    monkeypatch.setattr("litellm.completion", explode)
+    from dubizzle_car_assistant.agent import answer
+
+    result = answer("change to 9:am that day", session_id="shopper", user_id="jana", now=NOW)
+    assert [(row["listing_id"], row["slot"]) for row in _rows()] == [(12, "2026-10-31 09:00")]
+    assert "09:00" in result.reply
+    assert "Mazda" in result.reply
+
+
 def test_the_chat_reply_matches_the_rescheduled_sqlite_row(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "dubizzle_car_assistant.memory.profile.DATABASE_PATH",
@@ -360,6 +471,26 @@ def test_a_search_without_a_query_still_returns_the_mazda(tmp_path, monkeypatch)
     assert any(card["listing_id"] == 12 for card in result.listings)
 
 
+def test_the_named_mazda_is_shown_without_the_constraint_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "dubizzle_car_assistant.memory.profile.DATABASE_PATH",
+        tmp_path / "memory.sqlite",
+    )
+    from dubizzle_car_assistant.agent import answer
+    from dubizzle_car_assistant.memory.session import save_search_state
+
+    save_search_state("shopper", {"make": "mazda", "price_max": 40000, "focus_listing_id": 12})
+
+    def explode(**kwargs):
+        raise AssertionError("a named car is shown from the catalog")
+
+    monkeypatch.setattr("litellm.completion", explode)
+    result = answer("Show me the 2019 Mazda 3.", session_id="shopper")
+    assert "constraint" not in result.reply.lower()
+    assert [card["listing_id"] for card in result.listings] == [12]
+    assert "35,000" in result.reply
+
+
 def test_a_tool_error_is_the_reason_the_shopper_should_hear():
     choice = resolve_listing_reference(
         "book that car",
@@ -368,3 +499,50 @@ def test_a_tool_error_is_the_reason_the_shopper_should_hear():
     )
     assert choice["action"] == "ask"
     assert "latest search" in choice["reason"]
+
+
+def test_a_time_change_keeps_the_car_and_lists_open_hours(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "dubizzle_car_assistant.memory.profile.DATABASE_PATH",
+        tmp_path / "memory.sqlite",
+    )
+    from dubizzle_car_assistant.agent import answer
+    from dubizzle_car_assistant.booking import book_viewing
+    from dubizzle_car_assistant.memory.session import save_search_state
+
+    book_viewing(12, datetime(2026, 10, 31, 10, 0), now=NOW)
+    book_viewing(12, datetime(2026, 10, 31, 14, 0), now=NOW)
+    save_search_state("shopper", {"focus_listing_id": 12})
+    history = [
+        {
+            "role": "user",
+            "content": "I'd like to book a viewing for Saturday, October 31, 2026, at 10 AM.",
+        },
+        {"role": "assistant", "content": "That viewing is already booked."},
+    ]
+
+    def explode(**kwargs):
+        raise AssertionError("this booking follow-up is answered from the saved car and day")
+
+    monkeypatch.setattr("litellm.completion", explode)
+    changed = answer(
+        "can we make it that same day but at 2pm?",
+        history=history,
+        session_id="shopper",
+        user_id="jana",
+        now=NOW,
+    )
+    assert "14:00" in changed.reply
+    assert "already booked" in changed.reply
+    assert "09:00" in changed.reply
+    assert "10:00" not in changed.reply.split("Open times", 1)[-1]
+    history.append({"role": "user", "content": "can we make it that same day but at 2pm?"})
+    history.append({"role": "assistant", "content": changed.reply})
+    free = answer("what time is not booked?", history=history, session_id="shopper", user_id="jana", now=NOW)
+    assert "09:00" in free.reply
+    assert "13:00" in free.reply
+    assert "10:00" not in free.reply
+    assert "14:00" not in free.reply
+    picked = answer("12", history=history, session_id="shopper", user_id="jana", now=NOW)
+    assert "14:00" in picked.reply
+    assert "already booked" in picked.reply

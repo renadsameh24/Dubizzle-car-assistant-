@@ -120,7 +120,7 @@ def _soonest(today, weekday: int, hour: int, minute: int, now: datetime):
 
 def _clock(text: str) -> tuple[int, int] | None:
     match = re.search(
-        r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b",
+        r"\b(\d{1,2})(?::(\d{2}))?\s*:?\s*(a\.?m\.?|p\.?m\.?)\b",
         text,
         re.I,
     )
@@ -150,20 +150,50 @@ def _has_day_word(text: str) -> bool:
 
 
 def is_booking_change(text: str) -> bool:
-    return re.search(
+    if re.search(
         r"\b(instead|make it|move it|change it|change the (?:time|day|date|car)|reschedule|switch it|switch to)\b",
         text,
         re.I,
-    ) is not None
+    ):
+        return True
+    return re.search(r"\bchange to\b", text, re.I) is not None and (
+        _clock(text) is not None or _has_day_word(text)
+    )
+
+
+_BOOKING_WORD = r"book\w*|viewings?|appointments?|schedul\w*|reserv\w*"
 
 
 def is_recall(text: str) -> bool:
-    return re.search(
-        r"what did i book|what have i booked|what(?:'s| is) (?:booked|my booking)|"
-        r"my (?:booking|appointment|viewing)|when is (?:my|the) (?:booking|appointment|viewing)",
+    """A question about a saved viewing, matched by meaning rather than one sentence."""
+    if not text or asks_open_times(text) or is_booking_change(text) or _clock(text) is not None:
+        return False
+    if re.search(
+        r"\b(?:can i|could i|i want to|i(?:'d| would) like to|let me|please)\s+(?:book|schedule|reserve)\b",
         text,
         re.I,
+    ):
+        return False
+    return re.search(
+        rf"\b(?:what|when|which|who)\b.{{0,80}}\b(?:{_BOOKING_WORD})\b"
+        rf"|\b(?:{_BOOKING_WORD})\b.{{0,80}}\b(?:what|when|which|who)\b"
+        rf"|\b(?:did|do|have)\s+i\b.{{0,60}}\b(?:{_BOOKING_WORD})\b"
+        rf"|\bmy\s+(?:booking|viewing|appointment)s?\b"
+        rf"|\b(?:remind me|tell me)\b.{{0,50}}\b(?:{_BOOKING_WORD})\b",
+        text,
+        re.I | re.S,
     ) is not None
+
+
+def _question_without_a_new_slot(text: str) -> bool:
+    """A question that names no new day or hour, so it cannot be a new booking."""
+    if not text or asks_open_times(text) or is_booking_change(text):
+        return False
+    if _clock(text) is not None or _has_day_word(text):
+        return False
+    if re.search(r"\b(?:book|schedule|reserve)\b", text, re.I):
+        return False
+    return re.search(r"\?|\b(?:what|when|which|who|did i|do i|have i|am i)\b", text, re.I) is not None
 
 
 def _partial_schedule(text: str) -> bool:
@@ -175,6 +205,73 @@ def _partial_schedule(text: str) -> bool:
 def uses_saved_booking(text: str) -> bool:
     """A follow-up the assistant should answer from the saved appointment."""
     return is_recall(text) or is_booking_change(text)
+
+
+def asks_open_times(text: str) -> bool:
+    """The shopper wants the hours that are still free, not a new booking."""
+    return re.search(
+        r"what time(?:s)? (?:is|are) (?:not booked|free|available|open)|"
+        r"which time(?:s)? (?:is|are) (?:not booked|free|available|open)|"
+        r"times? (?:that are )?not booked|available (?:viewing )?times|open slots",
+        text,
+        re.I,
+    ) is not None
+
+
+def bare_listing_id(text: str) -> int | None:
+    match = re.fullmatch(r"\s*(?:listing\s+)?(\d{1,4})\s*", text, re.I)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def latest_schedule(history: list[dict[str, str]] | None, now: datetime) -> datetime | None:
+    """The most recent day and time the shopper already named."""
+    previous = None
+    found = None
+    for turn in history or []:
+        if turn.get("role") != "user":
+            continue
+        resolved = resolve_schedule(str(turn.get("content") or ""), now, previous=previous)
+        if "when" in resolved and isinstance(resolved["when"], datetime):
+            previous = resolved["when"]
+            found = resolved["when"]
+    return found
+
+
+def open_hours(listing_id: int, day) -> list[str]:
+    """On-the-hour viewing times from 08:00 through 19:00 that are not taken."""
+    connection = connect()
+    try:
+        rows = connection.execute(
+            "SELECT slot FROM bookings WHERE listing_id = ? AND slot LIKE ?",
+            (listing_id, f"{day.strftime('%Y-%m-%d')}%"),
+        ).fetchall()
+    finally:
+        connection.close()
+    taken = {str(row["slot"])[11:16] for row in rows}
+    return [f"{hour:02d}:00" for hour in range(8, 20) if f"{hour:02d}:00" not in taken]
+
+
+def open_times_reply(listing_id: int | None, when: datetime | None) -> str:
+    if not isinstance(listing_id, int):
+        return "Say which listing id, and I will list the open viewing times."
+    if when is None:
+        return "Say which day, and I will list the open viewing times."
+    slot = _as_dubai(when)
+    closed = viewing_rejection(datetime(slot.year, slot.month, slot.day, 10, 0, tzinfo=DUBAI))
+    frame = load_listings().set_index("listing_id")
+    if listing_id not in frame.index:
+        return f"Listing {listing_id} was not found."
+    car = frame.loc[listing_id]
+    label = f"{car['year']} {str(car['make']).title()} {str(car['model']).title()} (listing {listing_id})"
+    day_label = slot.strftime("%A %d %B %Y")
+    if closed and "Monday" in closed:
+        return f"Viewings are available Monday to Saturday. {day_label} is closed."
+    free = open_hours(listing_id, slot.date())
+    if not free:
+        return f"No viewing times are open for the {label} on {day_label}."
+    return f"Open viewing times for the {label} on {day_label}: {', '.join(free)}."
 
 
 def _summary(listing_id: int, year: int, make: str, model: str, slot_text: str, *, updated: bool = False, recalled: bool = False) -> str:
@@ -367,6 +464,22 @@ def _recall(saved: list[dict[str, object]], *, for_visitor: bool) -> dict[str, o
     return {"booked": True, "recalled": True, "summary": summary, "bookings": details}
 
 
+def _conflict_reply(result: dict[str, object], listing_id: int, when: datetime) -> dict[str, object]:
+    if result.get("booked") is not False or "already booked" not in str(result.get("reason")):
+        return result
+    slot = _as_dubai(when)
+    free = open_hours(listing_id, slot.date())
+    shown = ", ".join(free) if free else "none"
+    reason = (
+        f"{slot.strftime('%A %d %B %Y at %H:%M')} is already booked for listing {listing_id}. "
+        f"Open times that day: {shown}."
+    )
+    updated = dict(result)
+    updated["reason"] = reason
+    updated["summary"] = reason
+    return updated
+
+
 def request_viewing(
     arguments: dict[str, object],
     *,
@@ -375,6 +488,9 @@ def request_viewing(
     shown_searches: list[list[int]] | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    focus_listing_id: int | None = None,
+    attempted: datetime | None = None,
+    slot_at: datetime | None = None,
 ) -> dict[str, object]:
     current = now or datetime.now(DUBAI)
     text = user_text or ""
@@ -384,8 +500,22 @@ def request_viewing(
         saved = session_bookings(session_id)
     else:
         saved = []
-    if text and is_recall(text):
+    if text and (is_recall(text) or (saved and _question_without_a_new_slot(text))):
         return _recall(saved, for_visitor=bool(user_id))
+
+    if slot_at is not None and type(arguments.get("listing_id")) is int:
+        listing_id = int(arguments["listing_id"])
+        when = _as_dubai(slot_at)
+        result = book_viewing(
+            listing_id,
+            when,
+            now=current,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        result = _conflict_reply(result, listing_id, when)
+        result["resolved_when"] = when.strftime("%A %d %B %Y at %H:%M")
+        return result
 
     model_when = arguments.get("when")
     source = text
@@ -431,6 +561,12 @@ def request_viewing(
     previous = None
     if target is not None:
         previous = datetime.strptime(str(target["slot"]), "%Y-%m-%d %H:%M").replace(tzinfo=DUBAI)
+    elif attempted is not None:
+        previous = _as_dubai(attempted)
+    if not listing_ids and isinstance(focus_listing_id, int) and (
+        is_booking_change(spoken) or _partial_schedule(spoken)
+    ):
+        listing_ids = [focus_listing_id]
     if not listing_ids:
         reason = "Say which listing id to book."
         return {"booked": False, "reason": reason, "summary": reason}
@@ -452,7 +588,7 @@ def request_viewing(
         for listing_id in listing_ids
     ]
     if len(bookings) == 1:
-        result = dict(bookings[0])
+        result = _conflict_reply(dict(bookings[0]), listing_ids[0], schedule["when"])
         result["resolved_when"] = schedule["label"]
         return result
     return {

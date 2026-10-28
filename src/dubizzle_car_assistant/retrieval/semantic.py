@@ -17,13 +17,28 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 
 
 def load_gemini_key() -> None:
+    """Load the API key from .env. Optional chat-model names are loaded too.
+
+    GEMINI_CHAT_MODEL and GEMINI_CHAT_FALLBACK already set in the environment
+    are left unchanged.
+    """
     env_path = Path(__file__).resolve().parents[3] / ".env"
-    for line in env_path.read_text().splitlines():
-        name, separator, value = line.partition("=")
-        if name.strip() == "GEMINI_API_KEY" and separator and value.strip():
-            os.environ["GEMINI_API_KEY"] = value.strip()
-            return
-    raise RuntimeError("GEMINI_API_KEY is missing from .env")
+    found_key = bool(os.environ.get("GEMINI_API_KEY"))
+    optional = {"GEMINI_CHAT_MODEL", "GEMINI_CHAT_FALLBACK"}
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            name, separator, value = line.partition("=")
+            name = name.strip()
+            value = value.strip().strip('"').strip("'")
+            if not separator or not value or name.startswith("#"):
+                continue
+            if name == "GEMINI_API_KEY":
+                os.environ["GEMINI_API_KEY"] = value
+                found_key = True
+            elif name in optional and name not in os.environ:
+                os.environ[name] = value
+    if not found_key:
+        raise RuntimeError("GEMINI_API_KEY is missing from .env")
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:

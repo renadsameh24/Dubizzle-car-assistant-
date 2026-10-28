@@ -1,7 +1,7 @@
 [project]
 name = "dubizzle-car-assistant"
 version = "0.1.0"
-description = "Add your description here"
+description = "Shopping assistant for a sample dubizzle car inventory"
 readme = "README.md"
 authors = [
     { name = "renadsameh24", email = "g00102154@aus.edu" }

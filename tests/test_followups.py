@@ -305,3 +305,35 @@ def test_a_listing_question_does_not_drop_a_saved_booking_or_a_liked_car(tmp_pat
     recalled = answer("What did I book?", session_id="shopper", user_id="renad")
     assert "12" in recalled.reply
     assert load_profile("renad")["liked_listing_ids"] == [12]
+
+
+def test_a_memory_question_is_answered_from_the_profile(monkeypatch):
+    block_model(monkeypatch)
+    result = answer(
+        "What do you remember about what I'm looking for?",
+        profile={
+            "name": "Sally Bakr",
+            "preferences": ["Toyota under 50,000 AED"],
+            "liked_listing_ids": [],
+        },
+    )
+    assert result.answered is True
+    assert "Sally Bakr" in result.reply
+    assert "Toyota under 50,000 AED" in result.reply
+    assert result.listings == []
+
+
+def test_the_current_car_can_be_saved_as_a_preference(tmp_path, monkeypatch):
+    use_memory(monkeypatch, tmp_path)
+    block_model(monkeypatch)
+    remember_user("rahma", "Rahma")
+    save_search_state("shopper", {"focus_listing_id": 12})
+    result = answer("okay i want it as my preference", session_id="shopper", user_id="rahma")
+    assert result.answered is True
+    assert "listing 12" in result.reply
+    assert "Mazda" in result.reply
+    saved = load_profile("rahma")
+    assert any("Mazda" in note and "12" in note for note in saved["preferences"])
+    assert saved["liked_listing_ids"] == [12]
+    unnamed = answer("okay i want it as my preference", session_id="empty", user_id="rahma")
+    assert "Which car" in unnamed.reply

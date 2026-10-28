@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime
@@ -17,7 +18,15 @@ from dubizzle_car_assistant.memory.profile import (
     load_profile,
     remember_user,
 )
-from dubizzle_car_assistant.booking import request_viewing, uses_saved_booking
+from dubizzle_car_assistant.booking import (
+    DUBAI,
+    asks_open_times,
+    bare_listing_id,
+    latest_schedule,
+    open_times_reply,
+    request_viewing,
+    uses_saved_booking,
+)
 from dubizzle_car_assistant.conversation import (
     confirmed_only,
     inherited_constraints,
@@ -30,7 +39,9 @@ from dubizzle_car_assistant.conversation import (
     normalize_makes,
     opens_one_listing,
     price_cap,
+    preference_save,
     ranking_request,
+    recall_question,
     refers_to_previous_search,
     wants_global_catalog,
     wants_more_results,
@@ -43,7 +54,8 @@ from dubizzle_car_assistant.memory.session import (
 )
 from dubizzle_car_assistant.leads import request_lead
 
-CHAT_MODEL = "gemini/gemini-3.1-flash-lite"
+DEFAULT_CHAT_MODEL = "gemini/gemini-flash-lite-latest"
+DEFAULT_CHAT_FALLBACK = "gemini/gemini-3.5-flash-lite"
 logger = logging.getLogger("dubizzle")
 
 SEARCH_TOOL = {
@@ -167,7 +179,7 @@ def propose_search(user_message: str) -> dict[str, object]:
     import litellm
 
     response = litellm.completion(
-        model=CHAT_MODEL,
+        model=chat_models()[0],
         messages=[
             {
                 "role": "system",
@@ -197,9 +209,16 @@ LOCK_FIELDS = ("origin", "make", "model", "year_min", "year_max", "price_max", "
 
 
 class ChatAnswer:
-    def __init__(self, reply: str, listings: list[dict[str, object]] | None = None):
+    def __init__(
+        self,
+        reply: str,
+        listings: list[dict[str, object]] | None = None,
+        *,
+        answered: bool = True,
+    ):
         self.reply = reply
         self.listings = listings or []
+        self.answered = answered
 
 
 def dropped_constraint(arguments: dict[str, object], locked: dict[str, object] | None) -> str | None:
@@ -476,9 +495,9 @@ def run_search(
         model_max = arguments.get("price_max")
         arguments["price_max"] = remembered_price_max
         kept_budget = model_max != remembered_price_max
-    blocked = dropped_constraint(arguments, locked)
-    if blocked:
-        return {"error": blocked, "results": [], "potential": [], "cards": []}
+    if locked:
+        for field, value in locked.items():
+            arguments[field] = value
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
         return {"error": "search_cars requires a query string", "results": [], "potential": [], "cards": []}
@@ -620,7 +639,12 @@ def save_visitor_memory(
 
     if not saved:
         return {"saved": False, "error": "Nothing to save."}
-    return {"saved": True, "fields": saved}
+    result: dict[str, object] = {"saved": True, "fields": saved}
+    if isinstance(preference, str) and preference.strip():
+        result["preference"] = preference.strip()
+    if type(liked_listing_id) is int:
+        result["liked_listing_id"] = liked_listing_id
+    return result
 
 SYSTEM_PROMPT = (
     "You are a dubizzle car shopping assistant. "
@@ -666,21 +690,54 @@ SYSTEM_PROMPT = (
 
 BUSY_REPLY = "The car assistant is busy right now. Please try again in a minute."
 INCOMPLETE_REPLY = "I couldn't complete that. Please try the question again."
-RETRY_PAUSES = (0.05, 0.2)
-_TRANSIENT_ERRORS = (
+RETRY_PAUSES = (1.0,)
+_TRY_NEXT_MODEL = (
     "ServiceUnavailableError",
     "RateLimitError",
     "InternalServerError",
     "APIConnectionError",
     "Timeout",
+    "NotFoundError",
 )
+_STOP_STATUSES = {401, 403}
+
+
+def chat_models() -> list[str]:
+    """Primary chat model, then one fallback. Names come from the environment."""
+    primary = os.environ.get("GEMINI_CHAT_MODEL", DEFAULT_CHAT_MODEL).strip() or DEFAULT_CHAT_MODEL
+    fallback = os.environ.get("GEMINI_CHAT_FALLBACK", DEFAULT_CHAT_FALLBACK).strip()
+    models = [primary]
+    if fallback and fallback not in models:
+        models.append(fallback)
+    return models
+
+
+def _safe_detail(error: BaseException) -> str:
+    text = " ".join(str(error).split())
+    text = re.sub(r"AIza[0-9A-Za-z_\-]{8,}", "[redacted]", text)
+    text = re.sub(r"(?i)(api[_-]?key[\"']?\s*[:=]\s*)\S+", r"\1[redacted]", text)
+    return text[:180]
+
+
+def _pause_seconds(error: BaseException) -> float:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None) if response is not None else None
+    if headers is not None and hasattr(headers, "get"):
+        raw = headers.get("retry-after")
+        if raw:
+            try:
+                return min(max(float(raw), 0.0), 2.0)
+            except ValueError:
+                pass
+    pause = RETRY_PAUSES[0] if RETRY_PAUSES else 1.0
+    return min(max(pause, 0.0), 2.0)
 
 
 def completion_or_none(**kwargs: object) -> tuple[object | None, str | None]:
-    """Call Gemini. The second value is 'transient' or 'failed' when there is no response.
+    """Call Gemini. On 503, 429, or a retired model, try the fallback once.
 
-    Transient provider errors are retried. The exception text is not logged, because
-    provider errors can echo the request.
+    The second value is 'transient' or 'failed' when there is no response.
+    The provider message is logged without the API key.
     """
     import litellm
 
@@ -690,23 +747,46 @@ def completion_or_none(**kwargs: object) -> tuple[object | None, str | None]:
         litellm.InternalServerError,
         litellm.APIConnectionError,
         litellm.Timeout,
+        litellm.NotFoundError,
     )
-    attempts = len(RETRY_PAUSES) + 1
-    for attempt in range(attempts):
+    models = kwargs.pop("models", None)
+    kwargs.pop("model", None)
+    if not isinstance(models, list) or not models:
+        models = chat_models()
+    last_kind = "failed"
+    for index, model in enumerate(models):
+        kwargs["model"] = model
+        started = time.perf_counter()
         try:
-            return litellm.completion(**kwargs), None
-        except Exception as error:
-            transient = isinstance(error, transient_types) or type(error).__name__ in _TRANSIENT_ERRORS
-            logger.warning(
-                "gemini_error type=%s attempt=%s transient=%s",
-                type(error).__name__,
-                attempt + 1,
-                transient,
+            response = litellm.completion(**kwargs)
+            logger.info(
+                "gemini_ok model=%s ms=%.0f",
+                model,
+                (time.perf_counter() - started) * 1000,
             )
-            if not transient or attempt == attempts - 1:
-                return None, "transient" if transient else "failed"
-            time.sleep(RETRY_PAUSES[attempt])
-    return None, "transient"
+            return response, None
+        except Exception as error:
+            status = getattr(error, "status_code", None)
+            try_next = (
+                isinstance(error, transient_types)
+                or type(error).__name__ in _TRY_NEXT_MODEL
+                or status in {404, 408, 429, 500, 502, 503, 504}
+            )
+            if status in _STOP_STATUSES:
+                try_next = False
+            last_kind = "transient" if try_next else "failed"
+            logger.warning(
+                "gemini_error type=%s status=%s model=%s try_next=%s detail=%s",
+                type(error).__name__,
+                status,
+                model,
+                try_next,
+                _safe_detail(error),
+            )
+            if not try_next or index == len(models) - 1:
+                return None, last_kind
+            time.sleep(_pause_seconds(error))
+    return None, last_kind
 
 
 def _fallback(payloads: list[dict[str, object]], shown: list[dict[str, object]]) -> str:
@@ -730,6 +810,14 @@ def _fallback(payloads: list[dict[str, object]], shown: list[dict[str, object]])
             return " ".join(lines)
         if payload.get("error"):
             return str(payload["error"])
+        if payload.get("saved") is True:
+            note = payload.get("preference")
+            if isinstance(note, str) and note.strip():
+                return f"Saved. You want {note.strip()}."
+            liked = payload.get("liked_listing_id")
+            if type(liked) is int:
+                return f"Saved listing {liked} as a car you like."
+            return "Saved."
         if "results" in payload:
             return describe_results(payload)
     if shown:
@@ -982,12 +1070,60 @@ def _detail_answer(
     return ChatAnswer(reply, _cards([row]))
 
 
+def _memory_answer(profile: dict[str, object] | None) -> ChatAnswer:
+    """Answer a saved-preference question from the profile, without calling Gemini."""
+    if profile is None or not str(profile.get("name") or "").strip():
+        return ChatAnswer("I don't have a saved name or car preference for this visit yet.")
+    name = str(profile["name"]).strip()
+    preferences = [str(item).strip() for item in (profile.get("preferences") or []) if str(item).strip()]
+    liked = [int(item) for item in (profile.get("liked_listing_ids") or [])]
+    if preferences:
+        reply = f"Your name is {name}, and you said you want {preferences[-1]}."
+    else:
+        reply = f"Your name is {name}. You have not told me what kind of car you want yet."
+    if not liked:
+        return ChatAnswer(reply)
+    labels = []
+    for listing_id in liked:
+        row = get_listing_row(listing_id)
+        if row is None:
+            labels.append(f"listing {listing_id}")
+        else:
+            labels.append(
+                f"the {row['year']} {str(row['make']).title()} {str(row['model']).title()} (listing {listing_id})"
+            )
+    reply += " You liked " + ", ".join(labels) + "."
+    return ChatAnswer(reply)
+
+
+def _save_preference_answer(
+    target: str,
+    state: dict[str, object],
+    user_id: str | None,
+) -> ChatAnswer:
+    """Store a preference from the current car, or from the words they used."""
+    if user_id is None or not user_id.strip():
+        return ChatAnswer("Tell me your name first, then I can save that preference.")
+    if target == "focus":
+        focus = state.get("focus_listing_id")
+        if not isinstance(focus, int):
+            return ChatAnswer("Which car should I save? Tell me the listing, or the make and model.")
+        row = get_listing_row(focus)
+        if row is None:
+            return ChatAnswer("Which car should I save? Tell me the listing, or the make and model.")
+        note = f"the {row['year']} {str(row['make']).title()} {str(row['model']).title()} (listing {focus})"
+        save_visitor_memory(user_id, {"preference": note, "liked_listing_id": focus})
+        return ChatAnswer(f"Saved. You want {note}.")
+    save_visitor_memory(user_id, {"preference": target})
+    return ChatAnswer(f"Saved. You want {target}.")
+
+
 def _provider_reply(kind: str | None, payloads: list[dict[str, object]], shown: list[dict[str, object]]) -> ChatAnswer:
     if payloads:
         return _finish("", payloads, shown)
     if kind == "transient":
-        return ChatAnswer(BUSY_REPLY, shown)
-    return ChatAnswer(INCOMPLETE_REPLY, shown)
+        return ChatAnswer(BUSY_REPLY, shown, answered=False)
+    return ChatAnswer(INCOMPLETE_REPLY, shown, answered=False)
 
 
 def _more_answer(state: dict[str, object], session_id: str | None) -> ChatAnswer | None:
@@ -1027,17 +1163,44 @@ def answer(
     session_id: str | None = None,
     now: datetime | None = None,
 ) -> ChatAnswer:
-    if (user_id or session_id) and uses_saved_booking(user_message):
-        payload = request_viewing(
-            {},
-            user_text=user_message,
-            now=now,
-            session_id=session_id,
-            user_id=user_id,
-            shown_searches=get_searches(session_id) if session_id else [],
-        )
-        return ChatAnswer(str(payload.get("summary") or payload.get("reason") or ""), [])
+    current = now or datetime.now(DUBAI)
+    if user_id or session_id:
+        state = get_search_state(session_id) if session_id else {}
+        focus = state.get("focus_listing_id")
+        focus_id = focus if isinstance(focus, int) else None
+        attempted = latest_schedule(history, current)
+        if asks_open_times(user_message):
+            return ChatAnswer(open_times_reply(focus_id, attempted))
+        listed = bare_listing_id(user_message)
+        if listed is not None and attempted is not None:
+            payload = request_viewing(
+                {"listing_id": listed},
+                user_text=user_message,
+                now=current,
+                session_id=session_id,
+                user_id=user_id,
+                slot_at=attempted,
+            )
+            return ChatAnswer(str(payload.get("summary") or payload.get("reason") or ""), [])
+        if uses_saved_booking(user_message):
+            payload = request_viewing(
+                {},
+                user_text=user_message,
+                now=current,
+                session_id=session_id,
+                user_id=user_id,
+                shown_searches=get_searches(session_id) if session_id else [],
+                focus_listing_id=focus_id,
+                attempted=attempted,
+            )
+            return ChatAnswer(str(payload.get("summary") or payload.get("reason") or ""), [])
     normalized = normalize_makes(user_message)
+    if recall_question(normalized):
+        return _memory_answer(profile)
+    target = preference_save(normalized)
+    if target is not None:
+        state = get_search_state(session_id) if session_id else {}
+        return _save_preference_answer(target, state, user_id)
     state = get_search_state(session_id) if session_id else {}
     catalog = inventory_question(normalized)
     if catalog:
@@ -1110,7 +1273,6 @@ def answer(
     locked: dict[str, object] | None = None
     shown: list[dict[str, object]] = []
     response, failure = completion_or_none(
-        model=CHAT_MODEL,
         messages=messages,
         tools=tools,
         tool_choice="auto",
@@ -1198,7 +1360,7 @@ def answer(
             )
         if round_index == 2:
             break
-        follow: dict[str, object] = {"model": CHAT_MODEL, "messages": messages}
+        follow: dict[str, object] = {"messages": messages}
         if round_index == 0:
             follow["tools"] = tools
             follow["tool_choice"] = "auto"
