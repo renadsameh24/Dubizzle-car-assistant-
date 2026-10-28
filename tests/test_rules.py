@@ -41,3 +41,18 @@ def test_save_lead_requires_needs(tmp_path, monkeypatch):
     assert refused["saved"] is False
     assert text.count("visitor-9") == 1
     assert "white SUV" in text
+
+def test_answer_asks_the_user_to_retry_when_the_model_is_busy(monkeypatch):
+    import litellm
+
+    from dubizzle_car_assistant.agent import BUSY_REPLY, answer
+
+    def busy(*args, **kwargs):
+        raise litellm.ServiceUnavailableError(
+            message="busy",
+            llm_provider="gemini",
+            model="gemini/gemini-3.1-flash-lite",
+        )
+
+    monkeypatch.setattr(litellm, "completion", busy)
+    assert answer("Show me a family car") == BUSY_REPLY

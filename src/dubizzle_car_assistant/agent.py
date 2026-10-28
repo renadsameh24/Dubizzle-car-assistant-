@@ -225,6 +225,16 @@ SYSTEM_PROMPT = (
     "Do not name or recommend any other car website or marketplace."    
 )
 
+BUSY_REPLY = "The car assistant is busy right now. Please try again in a minute."
+
+
+def completion_or_none(**kwargs: object):
+    import litellm
+
+    try:
+        return litellm.completion(**kwargs)
+    except litellm.ServiceUnavailableError:
+        return None
 
 def answer(
     user_message: str,
@@ -233,7 +243,7 @@ def answer(
     user_id: str | None = None,
 ) -> str:
     load_gemini_key()
-    import litellm
+    
 
     system = SYSTEM_PROMPT
     if profile is not None and profile.get("name"):
@@ -256,12 +266,14 @@ def answer(
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": user_message})
 
-    first = litellm.completion(
-        model=CHAT_MODEL,
-        messages=messages,
-        tools=[SEARCH_TOOL, SAVE_TOOL, BOOK_TOOL, LEAD_TOOL],
-        tool_choice="auto",
+    first = completion_or_none(
+    model=CHAT_MODEL,
+    messages=messages,
+    tools=[SEARCH_TOOL, SAVE_TOOL, BOOK_TOOL, LEAD_TOOL],
+    tool_choice="auto",
     )
+    if first is None:
+        return BUSY_REPLY
     message = first.choices[0].message
     tool_calls = getattr(message, "tool_calls", None) or []
     if not tool_calls:
@@ -293,5 +305,7 @@ def answer(
                 "content": json.dumps(payload),
             }
         )
-    second = litellm.completion(model=CHAT_MODEL, messages=messages)
+    second = completion_or_none(model=CHAT_MODEL, messages=messages)
+    if second is None:
+        return BUSY_REPLY
     return second.choices[0].message.content or ""
