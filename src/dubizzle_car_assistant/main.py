@@ -124,7 +124,12 @@ class ChatResponse(BaseModel):
 def chat(request: ChatRequest) -> ChatResponse:
     history = get_history(request.session_id)
     profile = load_profile(request.user_id) if request.user_id else None
-    reply = answer(request.message, history=history, profile=profile)
+    reply = answer(
+    request.message,
+    history=history,
+    profile=profile,
+    user_id=request.user_id,
+    )
     append_turn(request.session_id, "user", request.message)
     append_turn(request.session_id, "assistant", reply)
     return ChatResponse(session_id=request.session_id, reply=reply)

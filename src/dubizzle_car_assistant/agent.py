@@ -2,6 +2,12 @@ import json
 
 from dubizzle_car_assistant.retrieval.semantic import load_gemini_key
 from dubizzle_car_assistant.retrieval.hybrid import hybrid_search
+from dubizzle_car_assistant.memory.profile import (
+    add_preference,
+    like_car,
+    load_profile,
+    remember_user,
+)
 
 CHAT_MODEL = "gemini/gemini-3.1-flash-lite"
 
@@ -35,6 +41,28 @@ SEARCH_TOOL = {
                 },
             },
             "required": ["query"],
+        },
+    },
+}
+
+SAVE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "save_visitor_memory",
+        "description": (
+            "Save the current visitor's name, a car preference, or a listing "
+            "they like. Call this when they state one of those."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "preference": {
+                    "type": "string",
+                    "description": "A car preference in the visitor's own words.",
+                },
+                "liked_listing_id": {"type": "integer"},
+            },
         },
     },
 }
@@ -94,6 +122,38 @@ def run_search(arguments: dict[str, object]) -> list[dict[str, object]]:
         for row in rows
     ]
 
+def save_visitor_memory(
+    user_id: str | None,
+    arguments: dict[str, object],
+) -> dict[str, object]:
+    if user_id is None or not user_id.strip():
+        return {"saved": False, "error": "No visitor id was provided."}
+
+    name = arguments.get("name")
+    preference = arguments.get("preference")
+    liked_listing_id = arguments.get("liked_listing_id")
+    saved: list[str] = []
+
+    if isinstance(name, str) and name.strip():
+        remember_user(user_id, name)
+        saved.append("name")
+
+    needs_user = (isinstance(preference, str) and preference.strip()) or type(liked_listing_id) is int
+    if needs_user and "name" not in saved and not load_profile(user_id)["name"]:
+        remember_user(user_id, "Visitor")
+
+    if isinstance(preference, str) and preference.strip():
+        add_preference(user_id, preference)
+        saved.append("preference")
+
+    if type(liked_listing_id) is int:
+        like_car(user_id, liked_listing_id)
+        saved.append("liked_listing_id")
+
+    if not saved:
+        return {"saved": False, "error": "Nothing to save."}
+    return {"saved": True, "fields": saved}
+
 SYSTEM_PROMPT = (
     "You are a dubizzle car shopping assistant. "
     "The inventory is available only through search_cars. "
@@ -103,6 +163,8 @@ SYSTEM_PROMPT = (
     "If the user refers to a car you already showed, answer from the conversation. "
     "Call search_cars again only when they ask for a different car. "
     "Do not invent listings, prices, or mileage."
+    "When the user gives their name, a car preference, or a listing they like, "
+    "call save_visitor_memory, then confirm only the fields that tool saved."
 )
 
 
@@ -110,6 +172,7 @@ def answer(
     user_message: str,
     history: list[dict[str, str]] | None = None,
     profile: dict[str, object] | None = None,
+    user_id: str | None = None,
 ) -> str:
     load_gemini_key()
     import litellm
@@ -130,7 +193,7 @@ def answer(
     messages: list[dict[str, object]] = [
         {"role": "system", "content": system},
     ]
-    
+
     for turn in history or []:
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": user_message})
@@ -138,7 +201,7 @@ def answer(
     first = litellm.completion(
         model=CHAT_MODEL,
         messages=messages,
-        tools=[SEARCH_TOOL],
+        tools=[SEARCH_TOOL, SAVE_TOOL],
         tool_choice="auto",
     )
     message = first.choices[0].message
@@ -148,10 +211,13 @@ def answer(
 
     messages.append(message.model_dump(exclude_none=True))
     for call in tool_calls:
-        if call.function.name != "search_cars":
-            payload: object = {"error": f"Unknown tool {call.function.name}"}
+        arguments = json.loads(call.function.arguments or "{}")
+        if call.function.name == "search_cars":
+            payload: object = run_search(arguments)
+        elif call.function.name == "save_visitor_memory":
+            payload = save_visitor_memory(user_id, arguments)
         else:
-            payload = run_search(json.loads(call.function.arguments))
+            payload = {"error": f"Unknown tool {call.function.name}"}
         messages.append(
             {
                 "role": "tool",
